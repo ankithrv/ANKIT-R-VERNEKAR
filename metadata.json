@@ -1,0 +1,6 @@
+{
+  "name": "Track Inspector",
+  "description": "Calculation and interpretation of railway track twist and cross levels for junior engineers",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

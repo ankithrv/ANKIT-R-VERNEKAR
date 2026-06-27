@@ -1,0 +1,43 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Sleepers (horizontal ties) -->
+    <path
+        android:strokeColor="#475569"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:pathData="M 28,34 L 80,34" />
+    <path
+        android:strokeColor="#475569"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:pathData="M 28,54 L 80,54" />
+    <path
+        android:strokeColor="#475569"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:pathData="M 28,74 L 80,74" />
+
+    <!-- Rails (vertical lines) -->
+    <path
+        android:strokeColor="#FBC02D"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:pathData="M 38,20 L 38,88" />
+    <path
+        android:strokeColor="#FBC02D"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:pathData="M 70,20 L 70,88" />
+
+    <!-- Stylized Bubble/Level Leveler indicator overlay -->
+    <path
+        android:fillColor="#E65100"
+        android:pathData="M 54,48 A 6,6 0 1,1 54,60 A 6,6 0 1,1 54,48 Z" />
+    <path
+        android:strokeColor="#E65100"
+        android:strokeWidth="2"
+        android:pathData="M 44,54 L 64,54" />
+</vector>
