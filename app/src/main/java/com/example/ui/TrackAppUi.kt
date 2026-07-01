@@ -37,6 +37,21 @@ import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.abs
 import kotlin.math.max
+import android.content.Context
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+
+import kotlinx.coroutines.launch
+
+enum class MeasurementMode(val label: String) {
+    GAUGE_ONLY("A. Gauge only for Plain Track"),
+    GAUGE_AND_CROSS_LEVEL("B. Gauge and cross levels for Plain Track"),
+    CURVE_MEASUREMENT("C. Curve Measurement"),
+    PC_MEASUREMENT("D. P&C measurement")
+}
 
 @Composable
 fun TrackAppUi(
@@ -49,90 +64,194 @@ fun TrackAppUi(
     val measurements by viewModel.measurements.collectAsState()
     val sessionInEdit by viewModel.sessionInEdit.collectAsState()
 
+    val context = LocalContext.current
+    val sharedPref = remember { context.getSharedPreferences("track_inspector_prefs", Context.MODE_PRIVATE) }
+
+    var isRegistered by remember { mutableStateOf(sharedPref.getBoolean("is_registered", false)) }
+    var isLoggedIn by remember { mutableStateOf(false) }
+    var loggedInUser by remember { mutableStateOf(sharedPref.getString("user_name", "Ankith R V") ?: "Ankith R V") }
+    var loggedInDesignation by remember { mutableStateOf(sharedPref.getString("user_designation", "Assistant Divisional Engineer") ?: "Assistant Divisional Engineer") }
+
+    var selectedMode by remember { mutableStateOf(MeasurementMode.GAUGE_AND_CROSS_LEVEL) }
+
+    var gaugeOnlySessionInEdit by remember { mutableStateOf<InspectionSession?>(null) }
+    var selectedGaugeOnlySession by remember { mutableStateOf<InspectionSession?>(null) }
+
+    val coroutineScope = rememberCoroutineScope()
+
     Surface(
         modifier = modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
     ) {
-        AnimatedContent(
-            targetState = currentScreen,
-            transitionSpec = {
-                fadeIn() togetherWith fadeOut()
-            },
-            label = "ScreenTransition"
-        ) { screen ->
-            when (screen) {
-                AppScreen.DASHBOARD -> {
-                    DashboardScreen(
-                        sessions = sessions,
-                        onSessionSelect = { session ->
-                            viewModel.selectSession(session)
-                            viewModel.navigateTo(AppScreen.TRACK_RECORDER)
-                        },
-                        onSessionDelete = { session ->
-                            viewModel.deleteSession(session)
-                        },
-                        onSessionEdit = { session ->
-                            viewModel.prepareEditSession(session)
-                        },
-                        onNewSessionClick = {
-                            viewModel.prepareNewSession()
-                        }
-                    )
+        if (!isRegistered) {
+            RegistrationScreen(
+                onRegistrationComplete = { name, gender, dob, desig, zone, division, mobile, email, pass, bioEnabled ->
+                    sharedPref.edit().apply {
+                        putBoolean("is_registered", true)
+                        putString("user_name", name)
+                        putString("user_gender", gender)
+                        putString("user_dob", dob)
+                        putString("user_designation", desig)
+                        putString("user_zone", zone)
+                        putString("user_division", division)
+                        putString("user_mobile", mobile)
+                        putString("user_email", email)
+                        putString("user_password", pass)
+                        putBoolean("biometrics_enabled", bioEnabled)
+                        apply()
+                    }
+                    loggedInUser = name
+                    loggedInDesignation = desig
+                    isRegistered = true
+                    isLoggedIn = true
                 }
-                AppScreen.SESSION_SETUP -> {
-                    SessionSetupScreen(
-                        session = sessionInEdit,
-                        onSave = { name, startKm, interval, nominalG, isCurve, designSe, remarks ->
-                            viewModel.saveSession(name, startKm, interval, nominalG, isCurve, designSe, remarks)
-                        },
-                        onCancel = {
-                            if (selectedSession != null) {
-                                viewModel.navigateTo(AppScreen.TRACK_RECORDER)
-                            } else {
-                                viewModel.navigateTo(AppScreen.DASHBOARD)
+            )
+        } else if (!isLoggedIn) {
+            LoginScreen(
+                registeredName = loggedInUser,
+                registeredDesignation = loggedInDesignation,
+                storedPassword = sharedPref.getString("user_password", "") ?: "",
+                biometricsEnabled = sharedPref.getBoolean("biometrics_enabled", false),
+                onLoginSuccess = {
+                    isLoggedIn = true
+                }
+            )
+        } else if (gaugeOnlySessionInEdit != null) {
+            GaugeOnlySetupScreen(
+                session = gaugeOnlySessionInEdit,
+                onSave = { blockSection, chainage, interval, nominalG, gaugeTypeRemarks ->
+                    val formattedRemarks = "[GAUGE_ONLY] | Chainage: $chainage | Type: $gaugeTypeRemarks"
+                    val isNew = gaugeOnlySessionInEdit!!.id == 0L
+                    coroutineScope.launch {
+                        val toSave = gaugeOnlySessionInEdit!!.copy(
+                            sectionName = blockSection,
+                            intervalMeters = interval,
+                            nominalGauge = nominalG,
+                            remarks = formattedRemarks,
+                            isCurve = false,
+                            designSuperelevation = 0.0
+                        )
+                        if (isNew) {
+                            val newId = viewModel.insertSessionDirectly(toSave)
+                            val created = toSave.copy(id = newId)
+                            selectedGaugeOnlySession = created
+                        } else {
+                            viewModel.updateSessionDirectly(toSave)
+                            selectedGaugeOnlySession = toSave
+                        }
+                        gaugeOnlySessionInEdit = null
+                    }
+                },
+                onCancel = {
+                    gaugeOnlySessionInEdit = null
+                }
+            )
+        } else if (selectedGaugeOnlySession != null) {
+            GaugeOnlyRecorderScreen(
+                session = selectedGaugeOnlySession!!,
+                viewModel = viewModel,
+                onBack = {
+                    selectedGaugeOnlySession = null
+                }
+            )
+        } else {
+            AnimatedContent(
+                targetState = currentScreen,
+                transitionSpec = {
+                    fadeIn() togetherWith fadeOut()
+                },
+                label = "ScreenTransition"
+            ) { screen ->
+                when (screen) {
+                    AppScreen.DASHBOARD -> {
+                        DashboardScreen(
+                            sessions = sessions,
+                            onSessionSelect = { session ->
+                                if (session.remarks.startsWith("[GAUGE_ONLY]")) {
+                                    selectedGaugeOnlySession = session
+                                } else {
+                                    viewModel.selectSession(session)
+                                    viewModel.navigateTo(AppScreen.TRACK_RECORDER)
+                                }
+                            },
+                            onSessionDelete = { session ->
+                                viewModel.deleteSession(session)
+                            },
+                            onSessionEdit = { session ->
+                                if (session.remarks.startsWith("[GAUGE_ONLY]")) {
+                                    gaugeOnlySessionInEdit = session
+                                } else {
+                                    viewModel.prepareEditSession(session)
+                                }
+                            },
+                            onNewSessionClick = {
+                                if (selectedMode == MeasurementMode.GAUGE_ONLY) {
+                                    gaugeOnlySessionInEdit = InspectionSession(sectionName = "", remarks = "[GAUGE_ONLY]")
+                                } else {
+                                    viewModel.prepareNewSession()
+                                }
+                            },
+                            selectedMode = selectedMode,
+                            onModeSelect = { selectedMode = it },
+                            loggedInUser = loggedInUser,
+                            loggedInDesignation = loggedInDesignation
+                        )
+                    }
+                    AppScreen.SESSION_SETUP -> {
+                        SessionSetupScreen(
+                            session = sessionInEdit,
+                            onSave = { name, startKm, interval, nominalG, isCurve, designSe, remarks ->
+                                viewModel.saveSession(name, startKm, interval, nominalG, isCurve, designSe, remarks)
+                            },
+                            onCancel = {
+                                if (selectedSession != null) {
+                                    viewModel.navigateTo(AppScreen.TRACK_RECORDER)
+                                } else {
+                                    viewModel.navigateTo(AppScreen.DASHBOARD)
+                                }
                             }
-                        }
-                    )
-                }
-                AppScreen.TRACK_RECORDER -> {
-                    TrackRecorderScreen(
-                        session = selectedSession,
-                        measurements = measurements,
-                        onBack = {
-                            viewModel.clearSelectedSession()
-                            viewModel.navigateTo(AppScreen.DASHBOARD)
-                        },
-                        onAddMeasurement = { cl, g, rem ->
-                            viewModel.addMeasurement(cl, g, rem)
-                        },
-                        onUpdateMeasurement = { m ->
-                            viewModel.updateMeasurement(m)
-                        },
-                        onDeleteMeasurement = { m ->
-                            viewModel.deleteMeasurement(m)
-                        },
-                        onLoadSampleData = {
-                            viewModel.generateSampleDataForSession()
-                        },
-                        onClearAll = {
-                            viewModel.clearAllMeasurementsForSession()
-                        },
-                        onViewAnalytics = {
-                            viewModel.navigateTo(AppScreen.ANALYTICS)
-                        },
-                        onEditSessionSettings = {
-                            selectedSession?.let { viewModel.prepareEditSession(it) }
-                        }
-                    )
-                }
-                AppScreen.ANALYTICS -> {
-                    AnalyticsScreen(
-                        session = selectedSession,
-                        measurements = measurements,
-                        onBack = {
-                            viewModel.navigateTo(AppScreen.TRACK_RECORDER)
-                        }
-                    )
+                        )
+                    }
+                    AppScreen.TRACK_RECORDER -> {
+                        TrackRecorderScreen(
+                            session = selectedSession,
+                            measurements = measurements,
+                            onBack = {
+                                viewModel.clearSelectedSession()
+                                viewModel.navigateTo(AppScreen.DASHBOARD)
+                            },
+                            onAddMeasurement = { cl, g, rem ->
+                                viewModel.addMeasurement(cl, g, rem)
+                            },
+                            onUpdateMeasurement = { m ->
+                                viewModel.updateMeasurement(m)
+                            },
+                            onDeleteMeasurement = { m ->
+                                viewModel.deleteMeasurement(m)
+                            },
+                            onLoadSampleData = {
+                                viewModel.generateSampleDataForSession()
+                            },
+                            onClearAll = {
+                                viewModel.clearAllMeasurementsForSession()
+                            },
+                            onViewAnalytics = {
+                                viewModel.navigateTo(AppScreen.ANALYTICS)
+                            },
+                            onEditSessionSettings = {
+                                selectedSession?.let { viewModel.prepareEditSession(it) }
+                            }
+                        )
+                    }
+                    AppScreen.ANALYTICS -> {
+                        AnalyticsScreen(
+                            session = selectedSession,
+                            measurements = measurements,
+                            onBack = {
+                                viewModel.navigateTo(AppScreen.TRACK_RECORDER)
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -146,8 +265,21 @@ fun DashboardScreen(
     onSessionSelect: (InspectionSession) -> Unit,
     onSessionDelete: (InspectionSession) -> Unit,
     onSessionEdit: (InspectionSession) -> Unit,
-    onNewSessionClick: () -> Unit
+    onNewSessionClick: () -> Unit,
+    selectedMode: MeasurementMode,
+    onModeSelect: (MeasurementMode) -> Unit,
+    loggedInUser: String,
+    loggedInDesignation: String
 ) {
+    val initials = remember(loggedInUser) {
+        loggedInUser.split(" ")
+            .filter { it.isNotEmpty() }
+            .map { it[0] }
+            .joinToString("")
+            .take(2)
+            .uppercase()
+    }
+
     Scaffold(
         floatingActionButton = {
             ExtendedFloatingActionButton(
@@ -181,33 +313,106 @@ fun DashboardScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(Color(0xFFDDE2F1)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "≡",
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF44474E)
-                        )
+                    var showModeMenu by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(
+                            onClick = { showModeMenu = true },
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(Color(0xFFDDE2F1))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = "Measurement Modes Menu",
+                                tint = Color(0xFF44474E)
+                            )
+                        }
+                        
+                        DropdownMenu(
+                            expanded = showModeMenu,
+                            onDismissRequest = { showModeMenu = false },
+                            modifier = Modifier.background(MaterialTheme.colorScheme.surface)
+                        ) {
+                            DropdownMenuItem(
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = if (selectedMode == MeasurementMode.GAUGE_ONLY) Icons.Default.Check else Icons.Default.Info,
+                                        contentDescription = null,
+                                        tint = if (selectedMode == MeasurementMode.GAUGE_ONLY) MaterialTheme.colorScheme.primary else Color.Gray,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                },
+                                text = { Text("A. Gauge only for Plain Track", fontWeight = if (selectedMode == MeasurementMode.GAUGE_ONLY) FontWeight.Bold else FontWeight.Normal) },
+                                onClick = {
+                                    onModeSelect(MeasurementMode.GAUGE_ONLY)
+                                    showModeMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = if (selectedMode == MeasurementMode.GAUGE_AND_CROSS_LEVEL) Icons.Default.Check else Icons.Default.Info,
+                                        contentDescription = null,
+                                        tint = if (selectedMode == MeasurementMode.GAUGE_AND_CROSS_LEVEL) MaterialTheme.colorScheme.primary else Color.Gray,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                },
+                                text = { Text("B. Gauge and cross levels for Plain Track", fontWeight = if (selectedMode == MeasurementMode.GAUGE_AND_CROSS_LEVEL) FontWeight.Bold else FontWeight.Normal) },
+                                onClick = {
+                                    onModeSelect(MeasurementMode.GAUGE_AND_CROSS_LEVEL)
+                                    showModeMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Lock,
+                                        contentDescription = null,
+                                        tint = Color.Gray,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                },
+                                text = { Text("C. Curve Measurement (Future)", color = Color.Gray) },
+                                onClick = {
+                                    onModeSelect(MeasurementMode.CURVE_MEASUREMENT)
+                                    showModeMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Lock,
+                                        contentDescription = null,
+                                        tint = Color.Gray,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                },
+                                text = { Text("D. P&C measurement (Future)", color = Color.Gray) },
+                                onClick = {
+                                    onModeSelect(MeasurementMode.PC_MEASUREMENT)
+                                    showModeMenu = false
+                                }
+                            )
+                        }
                     }
                     Column {
                         Text(
-                            text = "Track Geometry",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onBackground
+                            text = loggedInUser,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "JUNIOR ENGINEER PORTAL",
-                            fontSize = 9.sp,
+                            text = loggedInDesignation.uppercase(),
+                            fontSize = 8.sp,
                             fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp,
-                            color = Color(0xFF74777F)
+                            letterSpacing = 0.5.sp,
+                            color = Color(0xFF74777F),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -219,7 +424,7 @@ fun DashboardScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "RE",
+                        text = if (initials.isNotEmpty()) initials else "JE",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White
@@ -294,6 +499,9 @@ fun DashboardScreen(
                     .align(Alignment.CenterHorizontally),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                // Permanent Safety thoughts banner at the top of Dashboard
+                SafetyThoughtsBanner()
+
                 // Statistics Summary Card (Geometric Balance Theme style)
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -406,6 +614,11 @@ fun SessionItemCard(
     val formatter = remember { SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()) }
     val dateStr = formatter.format(Date(session.date))
 
+    val isGaugeOnly = session.remarks.startsWith("[GAUGE_ONLY]")
+    val chainageValue = if (isGaugeOnly) {
+        session.remarks.substringAfter("Chainage: ").substringBefore(" |")
+    } else ""
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -425,14 +638,33 @@ fun SessionItemCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = session.sectionName,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = session.sectionName,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (isGaugeOnly) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xE8E5F9E0))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    "GAUGE ONLY",
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF2E7D32)
+                                )
+                            }
+                        }
+                    }
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = dateStr,
@@ -477,14 +709,14 @@ fun SessionItemCard(
                 }
                 Box(modifier = Modifier.weight(1.2f)) {
                     SessionParameterBadge(
-                        label = "Start KM",
-                        value = "Km ${String.format("%.3f", session.startKm)}"
+                        label = if (isGaugeOnly) "Chainage" else "Start KM",
+                        value = if (isGaugeOnly) chainageValue else "Km ${String.format("%.3f", session.startKm)}"
                     )
                 }
                 Box(modifier = Modifier.weight(1.4f)) {
                     SessionParameterBadge(
                         label = "Type",
-                        value = if (session.isCurve) "Curve (${session.designSuperelevation}mm)" else "Straight"
+                        value = if (isGaugeOnly) "Gauge Only" else if (session.isCurve) "Curve (${session.designSuperelevation}mm)" else "Straight"
                     )
                 }
             }
@@ -1712,5 +1944,1155 @@ fun TrackProfileChart(
             color = Color(0xFFD84315),
             style = Stroke(width = 2.5f)
         )
+    }
+}
+
+// --- SUPPORTING SCREENS FOR REGISTRATION, LOGIN, AND GAUGE ONLY WORKFLOW ---
+
+@Composable
+fun SafetyThoughtsBanner() {
+    val thoughts = remember {
+        listOf(
+            "SAFETY FIRST: A millimeter of track deviation can be the difference between safety and hazard. Ensure absolute precision.",
+            "Zero defects, zero derailments: Protect human lives by maintaining rigorous inspection standards.",
+            "Your vigilance is the foundation of secure railways. Inspect every joint, spike, and sleeper.",
+            "Accuracy today ensures safe journeys tomorrow. Double check every cross-level and gauge reading."
+        )
+    }
+    
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = Color(0xFFFFF9C4) // Warm warning yellow
+        ),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.5.dp, Color(0xFFFBC02D))
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = "Safety Alert",
+                    tint = Color(0xFFE65100),
+                    modifier = Modifier.size(24.dp)
+                )
+                Text(
+                    text = "DAILY SAFETY COMMANDMENTS",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp,
+                    color = Color(0xFFE65100)
+                )
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            thoughts.forEach { thought ->
+                Row(
+                    modifier = Modifier.padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Text(
+                        text = "• ",
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFE65100)
+                    )
+                    Text(
+                        text = thought,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = Color(0xFF4E342E),
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun RegistrationScreen(
+    onRegistrationComplete: (
+        name: String, gender: String, dob: String, designation: String,
+        zone: String, division: String, mobile: String, email: String,
+        pass: String, biometricsEnabled: Boolean
+    ) -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var gender by remember { mutableStateOf("Male") }
+    var dob by remember { mutableStateOf("") }
+    var designation by remember { mutableStateOf("Junior Engineer") }
+    var zone by remember { mutableStateOf("Southern Railway") }
+    var division by remember { mutableStateOf("Chennai") }
+    var mobile by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var isPasswordVisible by remember { mutableStateOf(false) }
+    var isBiometricsEnabled by remember { mutableStateOf(false) }
+
+    // OTP related states
+    var otpSent by remember { mutableStateOf(false) }
+    var isSendingOtp by remember { mutableStateOf(false) }
+    var generatedOtp by remember { mutableStateOf("") }
+    var enteredOtp by remember { mutableStateOf("") }
+    var isOtpVerified by remember { mutableStateOf(false) }
+    var showOtpDialog by remember { mutableStateOf(false) }
+    var showBioDialog by remember { mutableStateOf(false) }
+
+    val isPasswordValid = password.isNotEmpty() && password.all { it.isDigit() || it.isLetter() }
+
+    val isFormValid = name.isNotBlank() && dob.isNotBlank() && designation.isNotBlank() &&
+            zone.isNotBlank() && division.isNotBlank() && mobile.length == 10 &&
+            email.contains("@") && isPasswordValid && isOtpVerified
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0F172A)) // High contrast dark slate
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        Text(
+            text = "REGISTRATION PORTAL",
+            color = Color(0xFFFBC02D),
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.5.sp
+        )
+        Text(
+            text = "Railway Track Inspector Portal Registration",
+            color = Color(0xFF94A3B8),
+            fontSize = 12.sp,
+            textAlign = TextAlign.Center
+        )
+
+        SafetyThoughtsBanner()
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, Color(0xFF334155))
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    text = "Personal Details",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Full Name", color = Color(0xFF94A3B8)) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = Color(0xFFFBC02D),
+                        unfocusedBorderColor = Color(0xFF334155)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Gender", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf("Male", "Female", "Other").forEach { g ->
+                            val selected = gender == g
+                            Button(
+                                onClick = { gender = g },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (selected) Color(0xFFFBC02D) else Color(0xFF334155),
+                                    contentColor = if (selected) Color(0xFF0F172A) else Color.White
+                                ),
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text(g, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = dob,
+                    onValueChange = { dob = it },
+                    label = { Text("Date of Birth (DD-MM-YYYY)", color = Color(0xFF94A3B8)) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = Color(0xFFFBC02D),
+                        unfocusedBorderColor = Color(0xFF334155)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = designation,
+                    onValueChange = { designation = it },
+                    label = { Text("Designation", color = Color(0xFF94A3B8)) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = Color(0xFFFBC02D),
+                        unfocusedBorderColor = Color(0xFF334155)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = zone,
+                    onValueChange = { zone = it },
+                    label = { Text("Zone (e.g. Southern Railway)", color = Color(0xFF94A3B8)) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = Color(0xFFFBC02D),
+                        unfocusedBorderColor = Color(0xFF334155)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = division,
+                    onValueChange = { division = it },
+                    label = { Text("Division (e.g. Chennai)", color = Color(0xFF94A3B8)) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = Color(0xFFFBC02D),
+                        unfocusedBorderColor = Color(0xFF334155)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, Color(0xFF334155))
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    text = "Contact & Authentication",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+
+                OutlinedTextField(
+                    value = mobile,
+                    onValueChange = { if (it.all { char -> char.isDigit() } && it.length <= 10) mobile = it },
+                    label = { Text("Mobile Number (10 digits)", color = Color(0xFF94A3B8)) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = Color(0xFFFBC02D),
+                        unfocusedBorderColor = Color(0xFF334155)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    label = { Text("Email Address", color = Color(0xFF94A3B8)) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = Color(0xFFFBC02D),
+                        unfocusedBorderColor = Color(0xFF334155)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // OTP Verification Trigger
+                if (!isOtpVerified) {
+                    Button(
+                        onClick = {
+                            if (mobile.length == 10 && email.contains("@")) {
+                                isSendingOtp = true
+                                val randomCode = (100000..999999).random().toString()
+                                generatedOtp = randomCode
+                                showOtpDialog = true
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF3B82F6)
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        enabled = mobile.length == 10 && email.contains("@")
+                    ) {
+                        if (isSendingOtp) {
+                            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp))
+                        } else {
+                            Text("Send OTP to Mobile & Email", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF065F46).copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                            .border(1.dp, Color(0xFF059669), RoundedCornerShape(12.dp))
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(imageVector = Icons.Default.Check, contentDescription = "Verified", tint = Color(0xFF34D399))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Mobile & Email Verified via OTP", color = Color(0xFF34D399), fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                }
+
+                Divider(color = Color(0xFF334155))
+
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("Set Password (numbers & letters only)", color = Color(0xFF94A3B8)) },
+                    singleLine = true,
+                    visualTransformation = if (isPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
+                            Icon(
+                                imageVector = if (isPasswordVisible) Icons.Default.Star else Icons.Default.Lock,
+                                contentDescription = if (isPasswordVisible) "Hide" else "Show",
+                                tint = Color(0xFF94A3B8)
+                            )
+                        }
+                    },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = Color(0xFFFBC02D),
+                        unfocusedBorderColor = Color(0xFF334155)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                if (password.isNotEmpty() && !isPasswordValid) {
+                    Text(
+                        "Password contains special characters! Only numbers and letters allowed.",
+                        color = Color(0xFFF87171),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Configure Biometric Logins", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text("Unlock instantly with device fingerprint reader", color = Color(0xFF94A3B8), fontSize = 11.sp)
+                    }
+                    Button(
+                        onClick = { showBioDialog = true },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isBiometricsEnabled) Color(0xFF10B981) else Color(0xFF334155)
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(if (isBiometricsEnabled) "Enabled" else "Setup")
+                    }
+                }
+            }
+        }
+
+        Button(
+            onClick = {
+                if (isFormValid) {
+                    onRegistrationComplete(name, gender, dob, designation, zone, division, mobile, email, password, isBiometricsEnabled)
+                }
+            },
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color(0xFFFBC02D),
+                contentColor = Color(0xFF0F172A)
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(16.dp),
+            enabled = isFormValid
+        ) {
+            Text("REGISTER & LOG IN", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+    }
+
+    // OTP Simulated Dialog
+    if (showOtpDialog) {
+        AlertDialog(
+            onDismissRequest = { showOtpDialog = false; isSendingOtp = false },
+            title = { Text("OTP Sent Successfully!") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("We have sent a 6-digit OTP verification code to both your mobile ($mobile) and email ($email).")
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFFFFF9C4), RoundedCornerShape(8.dp))
+                            .padding(12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("SIMULATED SMS OTP: $generatedOtp", fontWeight = FontWeight.Bold, color = Color(0xFFE65100))
+                    }
+                    OutlinedTextField(
+                        value = enteredOtp,
+                        onValueChange = { enteredOtp = it },
+                        label = { Text("Enter 6-digit OTP") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (enteredOtp == generatedOtp) {
+                            isOtpVerified = true
+                            showOtpDialog = false
+                        }
+                    }
+                ) {
+                    Text("VERIFY OTP")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showOtpDialog = false; isSendingOtp = false }) {
+                    Text("CANCEL")
+                }
+            }
+        )
+    }
+
+    // Biometrics Configuration Dialog
+    if (showBioDialog) {
+        AlertDialog(
+            onDismissRequest = { showBioDialog = false },
+            title = { Text("Biometric Enrollment") },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Text("Touch your finger on the biometric sensor area to bind your fingerprint.", textAlign = TextAlign.Center)
+                    Box(
+                        modifier = Modifier
+                            .size(80.dp)
+                            .clip(RoundedCornerShape(40.dp))
+                            .background(Color(0xFFE0F2FE))
+                            .clickable {
+                                isBiometricsEnabled = true
+                                showBioDialog = false
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(imageVector = Icons.Default.Lock, contentDescription = "Fingerprint Sensor", tint = Color(0xFF0284C7), modifier = Modifier.size(40.dp))
+                    }
+                    Text("Tap the sensor icon above to successfully scan", fontSize = 11.sp, color = Color.Gray)
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showBioDialog = false }) {
+                    Text("CANCEL")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun LoginScreen(
+    registeredName: String,
+    registeredDesignation: String,
+    storedPassword: String,
+    biometricsEnabled: Boolean,
+    onLoginSuccess: () -> Unit
+) {
+    var enteredPassword by remember { mutableStateOf("") }
+    var errorMessage by remember { mutableStateOf("") }
+    var isPasswordVisible by remember { mutableStateOf(false) }
+    var showBioScanDialog by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0F172A))
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = "SECURE PORTAL LOGIN",
+            color = Color(0xFFFBC02D),
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+
+        SafetyThoughtsBanner()
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, Color(0xFF334155))
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(60.dp)
+                        .clip(RoundedCornerShape(30.dp))
+                        .background(Color(0xFFFFF9C4)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(imageVector = Icons.Default.Lock, contentDescription = "Locked", tint = Color(0xFFE65100), modifier = Modifier.size(32.dp))
+                }
+
+                Text(
+                    text = "Welcome back, $registeredName",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    color = Color.White,
+                    textAlign = TextAlign.Center
+                )
+
+                Text(
+                    text = registeredDesignation.uppercase(),
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 11.sp,
+                    color = Color(0xFFFBC02D),
+                    letterSpacing = 0.5.sp
+                )
+
+                OutlinedTextField(
+                    value = enteredPassword,
+                    onValueChange = { enteredPassword = it },
+                    label = { Text("Enter Security Password", color = Color(0xFF94A3B8)) },
+                    singleLine = true,
+                    visualTransformation = if (isPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = Color(0xFFFBC02D),
+                        unfocusedBorderColor = Color(0xFF334155)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                if (errorMessage.isNotEmpty()) {
+                    Text(errorMessage, color = Color(0xFFF87171), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+
+                Button(
+                    onClick = {
+                        if (enteredPassword == storedPassword) {
+                            onLoginSuccess()
+                        } else {
+                            errorMessage = "Incorrect Password! Please try again."
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFBC02D)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("UNLOCK PORTAL", fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
+                }
+
+                if (biometricsEnabled) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { showBioScanDialog = true },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFBC02D)),
+                        border = BorderStroke(1.dp, Color(0xFFFBC02D)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("UNLOCK WITH FINGERPRINT")
+                    }
+                }
+            }
+        }
+    }
+
+    if (showBioScanDialog) {
+        AlertDialog(
+            onDismissRequest = { showBioScanDialog = false },
+            title = { Text("Biometric Authentication") },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text("Place your fingerprint on the reader device to verify your identity.", textAlign = TextAlign.Center)
+                    Box(
+                        modifier = Modifier
+                            .size(80.dp)
+                            .clip(RoundedCornerShape(40.dp))
+                            .background(Color(0xFFE0F2FE))
+                            .clickable {
+                                showBioScanDialog = false
+                                onLoginSuccess()
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(imageVector = Icons.Default.Lock, contentDescription = "Sensor Scan", tint = Color(0xFF0284C7), modifier = Modifier.size(36.dp))
+                    }
+                    Text("Click the icon to simulate a matched touch", fontSize = 11.sp, color = Color.Gray)
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showBioScanDialog = false }) {
+                    Text("CANCEL")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun GaugeOnlySetupScreen(
+    session: InspectionSession?,
+    onSave: (blockSection: String, chainage: String, interval: Double, nominalG: Double, gaugeTypeRemarks: String) -> Unit,
+    onCancel: () -> Unit
+) {
+    var blockSection by remember { mutableStateOf(session?.sectionName ?: "") }
+    var chainageRange by remember { mutableStateOf("") }
+    var intervalStr by remember { mutableStateOf(session?.intervalMeters?.toString() ?: "3.0") }
+    var nominalGStr by remember { mutableStateOf(session?.nominalGauge?.toString() ?: "1676.0") }
+    var gaugeTypeSelected by remember { mutableStateOf("Broad Gauge") }
+
+    // Prefill parameters if editing
+    LaunchedEffect(session) {
+        if (session != null && session.id != 0L) {
+            blockSection = session.sectionName
+            intervalStr = session.intervalMeters.toString()
+            nominalGStr = session.nominalGauge.toString()
+            if (session.remarks.contains("Chainage: ")) {
+                chainageRange = session.remarks.substringAfter("Chainage: ").substringBefore(" |")
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text(
+            text = if (session?.id == 0L) "NEW GAUGE ONLY SURVEY" else "EDIT GAUGE ONLY SURVEY",
+            fontWeight = FontWeight.Bold,
+            fontSize = 20.sp,
+            color = MaterialTheme.colorScheme.primary
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            shape = RoundedCornerShape(20.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                OutlinedTextField(
+                    value = blockSection,
+                    onValueChange = { blockSection = it },
+                    label = { Text("Block Section Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = chainageRange,
+                    onValueChange = { chainageRange = it },
+                    label = { Text("Chainage Range (e.g. Ch 120/4 to 121/6)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = intervalStr,
+                    onValueChange = { intervalStr = it },
+                    label = { Text("Inspection Intervals (meters)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = nominalGStr,
+                    onValueChange = { nominalGStr = it },
+                    label = { Text("Nominal Gauge Target (mm)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Preset Gauge Standards", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(
+                            "Broad Gauge" to 1676.0,
+                            "Meter Gauge" to 1000.0,
+                            "Narrow Gauge" to 762.0
+                        ).forEach { (label, value) ->
+                            val selected = gaugeTypeSelected == label
+                            Button(
+                                onClick = {
+                                    gaugeTypeSelected = label
+                                    nominalGStr = value.toString()
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                    contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                ),
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                            ) {
+                                Text(label.split(" ")[0], fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            OutlinedButton(
+                onClick = onCancel,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(50.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text("CANCEL")
+            }
+            Button(
+                onClick = {
+                    if (blockSection.isNotBlank() && chainageRange.isNotBlank()) {
+                        val interval = intervalStr.toDoubleOrNull() ?: 3.0
+                        val nominalG = nominalGStr.toDoubleOrNull() ?: 1676.0
+                        onSave(blockSection, chainageRange, interval, nominalG, gaugeTypeSelected)
+                    }
+                },
+                modifier = Modifier
+                    .weight(1.5f)
+                    .height(50.dp),
+                shape = RoundedCornerShape(12.dp),
+                enabled = blockSection.isNotBlank() && chainageRange.isNotBlank()
+            ) {
+                Text("SAVE & START", fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+fun GaugeOnlyRecorderScreen(
+    session: InspectionSession,
+    viewModel: TrackViewModel,
+    onBack: () -> Unit
+) {
+    val measurements by viewModel.measurements.collectAsState()
+    val sessionMeasurements = remember(measurements, session) {
+        measurements.filter { m: TrackMeasurement -> m.sessionId == session.id }.sortedBy { m: TrackMeasurement -> m.stationIndex }
+    }
+
+    var selectedStationIndex by remember { mutableStateOf(-1) }
+    var selectedDeviation by remember { mutableStateOf(0.0) }
+    var customDeviationStr by remember { mutableStateOf("") }
+    var remarksInput by remember { mutableStateOf("") }
+
+    val currentNominal = session.nominalGauge
+    val activeMeasurement = if (selectedStationIndex != -1 && selectedStationIndex < sessionMeasurements.size) {
+        sessionMeasurements[selectedStationIndex]
+    } else null
+
+    LaunchedEffect(selectedStationIndex) {
+        if (activeMeasurement != null) {
+            val dev = activeMeasurement.gauge - currentNominal
+            selectedDeviation = dev
+            customDeviationStr = ""
+            remarksInput = activeMeasurement.remarks
+        } else {
+            selectedDeviation = 0.0
+            customDeviationStr = ""
+            remarksInput = ""
+        }
+    }
+
+    val coroutineScope = rememberCoroutineScope()
+
+    Scaffold(
+        topBar = {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.primaryContainer)
+                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(imageVector = Icons.Default.ArrowBack, contentDescription = "Back")
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = session.sectionName,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                    Text(
+                        text = "Interval: ${session.intervalMeters}m | Nominal: ${session.nominalGauge}mm",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                    )
+                }
+            }
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .padding(innerPadding)
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+        ) {
+            // Measurements log list
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1.2f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(sessionMeasurements.size) { idx ->
+                    val item = sessionMeasurements[idx]
+                    val isSelected = selectedStationIndex == idx
+                    val calculatedChainage = idx * session.intervalMeters
+
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                selectedStationIndex = if (isSelected) -1 else idx
+                            },
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
+                        ),
+                        border = BorderStroke(
+                            width = if (isSelected) 2.dp else 1.dp,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Station #${item.stationIndex + 1} (${calculatedChainage.toInt()}m from origin)",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = "Gauge: ${item.gauge} mm",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    val dev = item.gauge - currentNominal
+                                    val devSign = if (dev >= 0) "+$dev" else "$dev"
+                                    Text(
+                                        text = "Dev: $devSign mm",
+                                        fontSize = 11.sp,
+                                        color = if (abs(dev) > 6.0) Color.Red else Color(0xFF2E7D32)
+                                    )
+                                }
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (item.remarks.isNotBlank()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .background(Color.Gray.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(item.remarks, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                }
+                                IconButton(
+                                    onClick = {
+                                        coroutineScope.launch {
+                                            viewModel.deleteMeasurement(item)
+                                        }
+                                        if (isSelected) selectedStationIndex = -1
+                                    },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = Color.Red, modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Keyboard/Selector Panel
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    val finalSelectedDeviation = if (customDeviationStr.isNotEmpty()) {
+                        customDeviationStr.toDoubleOrNull() ?: selectedDeviation
+                    } else {
+                        selectedDeviation
+                    }
+                    val targetGauge = currentNominal + finalSelectedDeviation
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (activeMeasurement == null) "New Station #${sessionMeasurements.size + 1}" else "Edit Station #${activeMeasurement.stationIndex + 1}",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        Box(
+                            modifier = Modifier
+                                .background(Color(0xFFE2E8F0), RoundedCornerShape(10.dp))
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "Gauge: $targetGauge mm",
+                                fontWeight = FontWeight.Bold,
+                                color = if (abs(finalSelectedDeviation) > 6.0) Color.Red else Color(0xFF1E293B)
+                            )
+                        }
+                    }
+
+                    // Deviation buttons grids
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Positive Deviations (+mm)", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.Gray)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            listOf(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0).forEach { valDev ->
+                                val active = finalSelectedDeviation == valDev
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (active) Color(0xFF4CAF50) else Color.White)
+                                        .clickable {
+                                            selectedDeviation = valDev
+                                            customDeviationStr = ""
+                                        }
+                                        .padding(vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "+${valDev.toInt()}",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (active) Color.White else Color.Black
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Negative Deviations (-mm)", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.Gray)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            listOf(-1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0, -8.0, -10.0).forEach { valDev ->
+                                val active = finalSelectedDeviation == valDev
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (active) Color(0xFFF44336) else Color.White)
+                                        .clickable {
+                                            selectedDeviation = valDev
+                                            customDeviationStr = ""
+                                        }
+                                        .padding(vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "${valDev.toInt()}",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (active) Color.White else Color.Black
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Custom input & remarks
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = customDeviationStr,
+                            onValueChange = { customDeviationStr = it },
+                            label = { Text("Custom mm (e.g. +1.5)", fontSize = 11.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                unfocusedTextColor = MaterialTheme.colorScheme.onSurface
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        OutlinedTextField(
+                            value = remarksInput,
+                            onValueChange = { remarksInput = it },
+                            label = { Text("Remarks/Note", fontSize = 11.sp) },
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                unfocusedTextColor = MaterialTheme.colorScheme.onSurface
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    // Save Station Button
+                    Button(
+                        onClick = {
+                            val computedGauge = currentNominal + finalSelectedDeviation
+                            val calculatedDistance = if (activeMeasurement == null) {
+                                sessionMeasurements.size * session.intervalMeters
+                            } else {
+                                activeMeasurement.distanceMeters
+                            }
+
+                            if (activeMeasurement == null) {
+                                viewModel.addMeasurementGaugeOnly(
+                                    session = session,
+                                    gauge = computedGauge,
+                                    remarks = remarksInput,
+                                    stationIdx = sessionMeasurements.size,
+                                    distMeters = calculatedDistance
+                                )
+                            } else {
+                                viewModel.updateMeasurement(
+                                    activeMeasurement.copy(
+                                        gauge = computedGauge,
+                                        remarks = remarksInput
+                                    )
+                                )
+                                selectedStationIndex = -1
+                            }
+                            remarksInput = ""
+                            customDeviationStr = ""
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            text = if (activeMeasurement == null) "SAVE NEW STATION SURVEY" else "UPDATE STATION SURVEY",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            }
+        }
     }
 }

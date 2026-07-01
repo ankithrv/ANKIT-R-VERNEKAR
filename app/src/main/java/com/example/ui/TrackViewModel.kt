@@ -11,7 +11,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
-class TrackViewModel(private val repository: TrackRepository) : ViewModel() {
+class TrackViewModel(val repository: TrackRepository) : ViewModel() {
 
     // Navigation State
     private val _currentScreen = MutableStateFlow(AppScreen.DASHBOARD)
@@ -128,6 +128,14 @@ class TrackViewModel(private val repository: TrackRepository) : ViewModel() {
         }
     }
 
+    suspend fun insertSessionDirectly(session: InspectionSession): Long {
+        return repository.insertSession(session)
+    }
+
+    suspend fun updateSessionDirectly(session: InspectionSession) {
+        repository.updateSession(session)
+    }
+
     // --- Measurement Actions ---
 
     fun addMeasurement(crossLevel: Double, gauge: Double, remarks: String) {
@@ -140,6 +148,20 @@ class TrackViewModel(private val repository: TrackRepository) : ViewModel() {
                 stationIndex = nextIndex,
                 distanceMeters = distance,
                 crossLevel = crossLevel,
+                gauge = gauge,
+                remarks = remarks
+            )
+            repository.insertMeasurement(measurement)
+        }
+    }
+
+    fun addMeasurementGaugeOnly(session: InspectionSession, gauge: Double, remarks: String, stationIdx: Int, distMeters: Double) {
+        viewModelScope.launch {
+            val measurement = TrackMeasurement(
+                sessionId = session.id,
+                stationIndex = stationIdx,
+                distanceMeters = distMeters,
+                crossLevel = 0.0,
                 gauge = gauge,
                 remarks = remarks
             )
